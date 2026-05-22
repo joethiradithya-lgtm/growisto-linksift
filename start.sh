@@ -6,8 +6,7 @@
 # It will:
 #   1. Check Python 3.10+ and Node.js are installed
 #   2. Create a virtualenv and install dependencies
-#   3. Ask for your Anthropic API key (or read from env)
-#   4. Start the server and open the browser
+#   3. Start the server and open the browser
 
 set -e
 cd "$(dirname "$0")"
@@ -65,34 +64,7 @@ pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 echo "  ✓ Dependencies installed"
 
-# ── 4. API key ──────────────────────────────────────────────
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-    # Try .env file in project root
-    if [ -f "../.env" ]; then
-        echo "→ Loading API key from .env file..."
-        export $(grep -v '^#' ../.env | xargs)
-    fi
-fi
-
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-    echo ""
-    echo "→ Anthropic API key not found in environment."
-    echo "  Get one at: https://console.anthropic.com/settings/keys"
-    echo ""
-    read -p "  Paste your API key (sk-ant-...): " ANTHROPIC_API_KEY
-    export ANTHROPIC_API_KEY
-
-    # Save for next time
-    echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" > ../.env
-    echo "  ✓ Saved to .env for next time"
-fi
-
-if [[ ! "$ANTHROPIC_API_KEY" == sk-ant-* ]]; then
-    echo "⚠  Warning: that doesn't look like a valid key (should start with 'sk-ant-')"
-    echo "   Trying anyway..."
-fi
-
-# ── 5. Start server ─────────────────────────────────────────
+# ── 4. Start server ─────────────────────────────────────────
 echo ""
 echo "╔════════════════════════════════════════════╗"
 echo "║   Server starting at:                      ║"
