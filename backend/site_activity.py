@@ -107,13 +107,39 @@ def _parse_date(raw: str) -> Optional[datetime]:
         return None
 
 
+# ── robots.txt sitemap discovery ───────────────────────────────────────
+async def _discover_sitemaps_from_robots(
+    client: httpx.AsyncClient, base: str
+) -> list[str]:
+    """Parse robots.txt and return declared Sitemap: URLs, freshest first."""
+    r = await _fetch(client, f"{base}/robots.txt")
+    if not r:
+        return []
+    sitemaps = []
+    for line in r.text.splitlines():
+        line = line.strip()
+        if line.lower().startswith("sitemap:"):
+            url = line.split(":", 1)[1].strip()
+            if url:
+                sitemaps.append(url)
+    # Sort: 48hours/daily/recent sitemaps first (most likely to have fresh dates)
+    freshness_priority = ["48hour", "daily", "recent", "news", "post", "article", "blog"]
+    def _rank(url: str) -> int:
+        u = url.lower()
+        for i, kw in enumerate(freshness_priority):
+            if kw in u:
+                return i
+        return len(freshness_priority)
+    return sorted(sitemaps, key=_rank)
+
+
 # ── 1) Sitemap check ───────────────────────────────────────────────────
 async def _check_sitemap(
     client: httpx.AsyncClient, base: str, window_start: datetime, checked: list[str]
 ) -> Optional[tuple[datetime, int]]:
     """
     Returns (latest_post_date, count_in_window) or None.
-    Walks sitemap indexes one level deep, prioritizing blog/news sitemaps.
+    Tries robots.txt-declared sitemaps first, then falls back to common paths.
     """
     latest: Optional[datetime] = None
     in_window = 0
@@ -132,14 +158,21 @@ async def _check_sitemap(
         except Exception:
             soup = BeautifulSoup(r.text, "xml")
 
-        # Nested sitemap index
+        # Detect Google News sitemaps — they only contain article URLs so
+        # skip the blog-path filter; accept any URL with a date.
+        is_news_sitemap = (
+            "news" in url.lower()
+            or "48hour" in url.lower()
+            or bool(soup.find("news:news"))
+        )
+
+        # Nested sitemap index — recurse into content-flavoured child sitemaps
         for sm in soup.find_all("sitemap"):
             loc = sm.find("loc")
             if not loc or not loc.text:
                 continue
             child_url = loc.text.strip()
-            # Prioritize blog/news/post sitemaps
-            if any(h in child_url.lower() for h in ["blog", "post", "news", "article"]):
+            if any(h in child_url.lower() for h in ["blog", "post", "news", "article", "48hour", "daily"]):
                 await parse_sitemap(child_url, depth + 1)
 
         # Page-level URLs — stop once we've confirmed 3 recent posts
@@ -147,14 +180,22 @@ async def _check_sitemap(
             if in_window >= 3:
                 break
             loc = url_el.find("loc")
-            lastmod = url_el.find("lastmod")
             if not loc or not loc.text:
                 continue
             page_url = loc.text.strip().lower()
-            if not any(h in page_url for h in BLOG_PATH_HINTS):
+
+            # For regular sitemaps filter by known content paths;
+            # for news sitemaps every entry is an article so skip the filter.
+            if not is_news_sitemap and not any(h in page_url for h in BLOG_PATH_HINTS):
                 continue
+
+            # Try <lastmod>, then <news:publication_date> as fallback
+            lastmod = url_el.find("lastmod")
+            if not lastmod or not lastmod.text:
+                lastmod = url_el.find("publication_date")
             if not lastmod or not lastmod.text:
                 continue
+
             dt = _parse_date(lastmod.text)
             if not dt:
                 continue
@@ -163,10 +204,19 @@ async def _check_sitemap(
             if dt >= window_start:
                 in_window += 1
 
-    for path in SITEMAP_CANDIDATES:
-        await parse_sitemap(urljoin(base, path))
+    # 1a. Try sitemaps declared in robots.txt (correct path for many large sites)
+    robots_sitemaps = await _discover_sitemaps_from_robots(client, base)
+    for url in robots_sitemaps:
+        await parse_sitemap(url)
         if latest is not None:
-            break  # found something usable in this sitemap, stop trying others
+            break
+
+    # 1b. Fall back to well-known paths if robots.txt had nothing useful
+    if latest is None:
+        for path in SITEMAP_CANDIDATES:
+            await parse_sitemap(urljoin(base, path))
+            if latest is not None:
+                break
 
     if latest is None:
         return None
@@ -328,8 +378,9 @@ async def check_site_activity(
                 posts_in_window=in_window,
                 window_months=window_months,
                 notes=(
-                    f"Recent content found via {method}; "
-                    f"last post {latest.date().isoformat()}."
+                    f"Last post {latest.date().isoformat()} "
+                    f"({'active' if latest >= window_start else 'inactive — last post outside window'}, "
+                    f"via {method})."
                 ),
                 checked_urls=checked[:8],
             )
