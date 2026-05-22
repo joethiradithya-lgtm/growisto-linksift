@@ -51,7 +51,7 @@ class Backlink(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
-    target_domain: str
+    target_domain: str = ""
     industry: str
     geography: str
     window_months: int = Field(6, ge=1, le=24)
@@ -91,7 +91,6 @@ async def analyze(req: AnalyzeRequest):
             try:
                 async for ev in analyze_batch_agentic(
                     batch=batch,
-                    target_domain=req.target_domain,
                     industry=req.industry,
                     geography=req.geography,
                     window_months=req.window_months,

@@ -46,7 +46,7 @@ _BUNDLED_CLI = Path(_sdk_pkg.__file__).parent / "_bundled" / "claude"
 SYSTEM_PROMPT = """You are an expert SEO backlink analyst working inside an agentic pipeline.
 
 Your job: for each backlink domain in the input, decide whether it is a worthwhile
-backlink for the target website. You have access to these tools:
+backlink opportunity based on the target industry and geography. You have access to these tools:
 
   - check_site_activity(domain, window_months): inspect sitemap/RSS/blog for recent posts
   - fetch_homepage_summary(domain): grab homepage title/description/snippet
@@ -87,13 +87,11 @@ Workflow:
 def _build_user_prompt(
     batch: list[dict],
     activity_map: dict[str, dict],
-    target_domain: str,
     industry: str,
     geography: str,
     window_months: int,
 ) -> str:
     lines = [
-        f"TARGET WEBSITE: {target_domain}",
         f"INDUSTRY: {industry}",
         f"TARGET GEOGRAPHY: {geography}",
         f"ACTIVITY WINDOW: last {window_months} months",
@@ -170,7 +168,6 @@ async def _gather_activity(
 
 async def analyze_batch_agentic(
     batch: list[dict],
-    target_domain: str,
     industry: str,
     geography: str,
     window_months: int = 6,
@@ -196,7 +193,7 @@ async def analyze_batch_agentic(
 
     # 3) Build the agent prompt
     user_prompt = _build_user_prompt(
-        batch, activity_map, target_domain, industry, geography, window_months
+        batch, activity_map, industry, geography, window_months
     )
 
     # 4) Configure the agent

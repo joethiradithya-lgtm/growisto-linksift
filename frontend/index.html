@@ -83,7 +83,7 @@
     margin-bottom: 32px;
   }
 
-  .form-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
   @media (max-width: 768px) { .form-grid { grid-template-columns: 1fr; } }
 
   .field label {
@@ -425,10 +425,6 @@
     <div class="section-label">Target Configuration</div>
     <div class="form-grid">
       <div class="field">
-        <label>Your Domain</label>
-        <input type="text" id="domain" placeholder="e.g. mysite.com" />
-      </div>
-      <div class="field">
         <label>Industry / Niche</label>
         <div class="select-wrap">
           <select id="industry">
@@ -478,30 +474,23 @@
       </div>
     </div>
 
-    <div class="section-label">Quality Filters (Minimum Thresholds)</div>
+    <div class="section-label">Result Filters</div>
     <div class="filters-row">
       <div class="filter-field">
         <label>Min DR</label>
-        <input type="number" id="minDR" value="20" min="0" max="100" />
+        <input type="number" id="minDR" value="0" min="0" max="100" />
       </div>
       <div class="filter-field">
         <label>Min Traffic</label>
-        <input type="number" id="minTraffic" value="500" min="0" />
+        <input type="number" id="minTraffic" value="0" min="0" />
       </div>
       <div class="filter-field">
         <label>Max Spam Score</label>
-        <input type="number" id="maxSpam" value="30" min="0" max="100" />
+        <input type="number" id="maxSpam" value="100" min="0" max="100" />
       </div>
       <div class="filter-field">
         <label data-tip="How many months back to look for blog posts">Activity Window (mo)</label>
         <input type="number" id="windowMonths" value="6" min="1" max="24" />
-      </div>
-      <div class="filter-field">
-        <label data-tip="Hide sites with no recent content">Hide Inactive</label>
-        <select id="hideInactive" style="width:110px;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;color:var(--text);font-family:var(--mono);font-size:13px;padding:9px 12px;outline:none;appearance:none;">
-          <option value="no">No</option>
-          <option value="yes">Yes</option>
-        </select>
       </div>
     </div>
 
@@ -748,27 +737,17 @@ function escapeHtml(s) {
 
 // ─── Main Analysis ────────────────────────────────────────
 async function runAnalysis() {
-  const domain = document.getElementById('domain').value.trim();
   const industry = document.getElementById('industry').value;
   const geography = document.getElementById('geography').value;
-  const minDR = parseInt(document.getElementById('minDR').value) || 0;
-  const minTraffic = parseInt(document.getElementById('minTraffic').value) || 0;
-  const maxSpam = parseInt(document.getElementById('maxSpam').value) || 100;
   const windowMonths = parseInt(document.getElementById('windowMonths').value) || 6;
 
   showError(''); showInfo('');
 
-  if (!domain) return showError('Please enter your domain.');
   if (!industry) return showError('Please select an industry.');
   if (!geography) return showError('Please select a target geography.');
   if (parsedData.length === 0) return showError('Please upload a CSV/Excel file.');
 
-  const filtered = parsedData.filter(r => r.dr >= minDR && r.traffic >= minTraffic && r.spam <= maxSpam);
-  if (filtered.length === 0) {
-    return showError(`No backlinks passed your quality filters. Try relaxing the thresholds.`);
-  }
-
-  showInfo(`⚙ Pre-filtered to ${filtered.length} quality backlinks (from ${parsedData.length}).`);
+  showInfo(`⚙ Sending all ${parsedData.length} backlinks for analysis...`);
 
   const btn = document.getElementById('analyzeBtn');
   btn.disabled = true;
@@ -780,11 +759,10 @@ async function runAnalysis() {
 
   try {
     await streamAgentAnalysis({
-      target_domain: domain,
       industry,
       geography,
       window_months: windowMonths,
-      backlinks: filtered,
+      backlinks: parsedData,
       batch_size: 15,
     });
     setProgress(100, 'Analysis complete!');
@@ -904,14 +882,19 @@ function handleStreamEvent(type, data, total, getDone, setDone) {
 }
 
 // ─── Render Results ───────────────────────────────────────
+function _applyResultFilters(data) {
+  const minDR = parseInt(document.getElementById('minDR').value) || 0;
+  const minTraffic = parseInt(document.getElementById('minTraffic').value) || 0;
+  const maxSpam = parseInt(document.getElementById('maxSpam').value) || 100;
+  return data.filter(r => r.dr >= minDR && r.traffic >= minTraffic && r.spam <= maxSpam);
+}
+
 function renderResults(data) {
   const section = document.getElementById('results-section');
   section.style.display = 'block';
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  const hideInactive = document.getElementById('hideInactive').value === 'yes';
-  let filtered = [...data];
-  if (hideInactive) filtered = filtered.filter(r => r.activity && r.activity.is_active);
+  let filtered = _applyResultFilters(data);
 
   const counts = { Strong: 0, Good: 0, Weak: 0, Reject: 0 };
   let active = 0, dead = 0;
@@ -993,20 +976,14 @@ function sortResults(key) {
   currentSort = key;
   document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('sort-' + key).classList.add('active');
-  const hideInactive = document.getElementById('hideInactive').value === 'yes';
-  let data = [...analysisResults];
-  if (hideInactive) data = data.filter(r => r.activity && r.activity.is_active);
-  renderTable(data);
+  renderTable(_applyResultFilters(analysisResults));
 }
 
 function filterResults(tag) {
   currentFilter = tag;
   document.querySelectorAll('.filter-tag').forEach(t => t.classList.remove('active'));
   document.getElementById('ftag-' + tag).classList.add('active');
-  const hideInactive = document.getElementById('hideInactive').value === 'yes';
-  let data = [...analysisResults];
-  if (hideInactive) data = data.filter(r => r.activity && r.activity.is_active);
-  renderTable(data);
+  renderTable(_applyResultFilters(analysisResults));
 }
 
 // ─── Export ───────────────────────────────────────────────
