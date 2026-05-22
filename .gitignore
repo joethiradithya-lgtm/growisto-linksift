@@ -1,0 +1,61 @@
+# ── Secrets ────────────────────────────────────────────────
+# NEVER commit your API key.
+.env
+.env.local
+.env.*
+*.key
+*.pem
+
+# ── Python ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ── Testing / linting ──────────────────────────────────────
+.pytest_cache/
+.coverage
+.tox/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# ── IDE / editor ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Node / Claude Agent SDK CLI ────────────────────────────
+node_modules/
+.npm/
+.pnpm-store/
+
+# ── Logs ───────────────────────────────────────────────────
+*.log
+logs/
+/tmp/
