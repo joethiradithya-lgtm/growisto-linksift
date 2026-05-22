@@ -30,10 +30,20 @@ from dateutil import parser as dateparser
 
 # ── Config ─────────────────────────────────────────────────────────────
 DEFAULT_TIMEOUT = 12.0
+
+# Clean browser UA — no bot identifier, passes basic Cloudflare checks
 USER_AGENT = (
-    "Mozilla/5.0 (compatible; LinkSiftBot/1.0; +https://linksift.local) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
 )
+
+BROWSER_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    # No Accept-Encoding — let httpx handle it (supports gzip/deflate but not brotli)
+}
 
 BLOG_PATH_HINTS = [
     "/blog", "/news", "/articles", "/posts", "/resources",
@@ -75,6 +85,17 @@ class ActivityResult:
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────
+_CF_MARKERS = ("just a moment", "cf-ray", "cloudflare", "enable javascript")
+
+
+def _is_blocked(r: httpx.Response) -> bool:
+    """True if the response is a bot-protection page (Cloudflare etc.)."""
+    if r.status_code in (403, 429, 503):
+        body = r.text[:1000].lower()
+        return any(m in body for m in _CF_MARKERS) or "cf-ray" in r.headers
+    return False
+
+
 async def _fetch(client: httpx.AsyncClient, url: str) -> Optional[httpx.Response]:
     try:
         r = await client.get(url, follow_redirects=True, timeout=DEFAULT_TIMEOUT)
@@ -83,6 +104,19 @@ async def _fetch(client: httpx.AsyncClient, url: str) -> Optional[httpx.Response
     except (httpx.HTTPError, httpx.TimeoutException):
         return None
     return None
+
+
+async def _fetch_or_blocked(client: httpx.AsyncClient, url: str) -> tuple[Optional[httpx.Response], bool]:
+    """Returns (response, was_blocked). was_blocked=True means bot-protection fired."""
+    try:
+        r = await client.get(url, follow_redirects=True, timeout=DEFAULT_TIMEOUT)
+        if _is_blocked(r):
+            return None, True
+        if r.status_code == 200 and r.content:
+            return r, False
+    except (httpx.HTTPError, httpx.TimeoutException):
+        pass
+    return None, False
 
 
 def _normalize_domain(domain: str) -> str:
@@ -346,22 +380,30 @@ def _extract_dates_from_html(html: str) -> list[datetime]:
 
 async def _check_scrape(
     client: httpx.AsyncClient, base: str, window_start: datetime, checked: list[str]
-) -> Optional[tuple[datetime, int]]:
+) -> tuple[Optional[tuple[datetime, int]], bool]:
     """
     Visit homepage and common content paths, extract article dates.
-    Returns on the first page that yields at least one in-window date.
+    Returns (result, was_blocked).
+    result is (latest_date, in_window_count) or None.
+    was_blocked=True means every request was bot-protected.
     """
     best: Optional[tuple[datetime, int]] = None
+    any_blocked = False
+    any_success = False
 
     for path in SCRAPE_PATHS:
         url = base if path == "" else urljoin(base, path)
         checked.append(url)
-        r = await _fetch(client, url)
+        r, blocked = await _fetch_or_blocked(client, url)
+        if blocked:
+            any_blocked = True
+            continue
         if not r:
             continue
         if "html" not in r.headers.get("content-type", "").lower():
             continue
 
+        any_success = True
         dates = _extract_dates_from_html(r.text)
         if not dates:
             continue
@@ -369,15 +411,14 @@ async def _check_scrape(
         latest = max(dates)
         in_window = sum(1 for d in dates if d >= window_start)
 
-        # If we found in-window articles, return immediately
         if in_window > 0:
-            return latest, in_window
+            return (latest, in_window), False
 
-        # Keep the most-recent result seen so far as a fallback
         if best is None or latest > best[0]:
             best = (latest, in_window)
 
-    return best
+    was_blocked = any_blocked and not any_success
+    return best, was_blocked
 
 
 # ── Orchestrator ───────────────────────────────────────────────────────
@@ -397,7 +438,7 @@ async def check_site_activity(
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(
-            headers={"User-Agent": USER_AGENT},
+            headers=BROWSER_HEADERS,
             timeout=DEFAULT_TIMEOUT,
             limits=httpx.Limits(max_connections=5),
         )
@@ -422,25 +463,41 @@ async def check_site_activity(
         )
 
     try:
-        # Keep the best "inactive" result found so far so we can fall through
-        # to the next method rather than stopping at a stale sitemap/RSS date.
         inactive_fallback: Optional[ActivityResult] = None
 
-        for method, fn in [
-            ("sitemap", _check_sitemap),
-            ("rss", _check_rss),
-            ("scrape", _check_scrape),
-        ]:
+        # sitemap and RSS return Optional[tuple] as before
+        for method, fn in [("sitemap", _check_sitemap), ("rss", _check_rss)]:
             result = await fn(client, base, window_start, checked)
             if result is None:
                 continue
             latest, in_window = result
             if latest >= window_start:
-                # Confirmed active — return immediately
                 return _make_result(method, latest, in_window)
-            # Found a date but outside the window — keep trying other methods
             if inactive_fallback is None:
                 inactive_fallback = _make_result(method, latest, in_window)
+
+        # Scrape returns (result, was_blocked)
+        scrape_result, was_blocked = await _check_scrape(client, base, window_start, checked)
+        if scrape_result is not None:
+            latest, in_window = scrape_result
+            if latest >= window_start:
+                return _make_result("scrape", latest, in_window)
+            if inactive_fallback is None:
+                inactive_fallback = _make_result("scrape", latest, in_window)
+
+        # If scraping was bot-blocked we cannot confirm the site is inactive,
+        # even if a stale sitemap suggested it — prefer "unknown" over a false
+        # inactive verdict. Agent will judge from DR/traffic instead.
+        if was_blocked:
+            return ActivityResult(
+                domain=domain,
+                is_active=True,
+                method="blocked",
+                window_months=window_months,
+                notes="Site is protected (Cloudflare/bot-block). "
+                      "Could not verify activity — assume active pending manual check.",
+                checked_urls=checked[:8],
+            )
 
         if inactive_fallback is not None:
             return inactive_fallback

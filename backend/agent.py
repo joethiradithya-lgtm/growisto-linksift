@@ -34,7 +34,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
-from site_activity import check_site_activity, ActivityResult, USER_AGENT
+from site_activity import check_site_activity, ActivityResult, BROWSER_HEADERS
 import agent_tools
 
 
@@ -63,7 +63,9 @@ For every domain you analyze, weigh THREE factors:
      activity_factored=true when you do this.
 
 Activity rules:
-  - is_active=true  → no penalty
+  - is_active=true, method=sitemap/rss/scrape → confirmed active, no penalty
+  - is_active=true, method=blocked → site is Cloudflare-protected, could not verify;
+    do NOT penalise — use DR/Traffic/category to judge instead
   - is_active=false → cap recommendation at "Weak" and reduce score by 20+
 
 Scoring bands:
@@ -136,7 +138,7 @@ async def _gather_activity(
     """Yield (domain, result) as each activity check completes — no waiting for all."""
     sem = asyncio.Semaphore(concurrency)
     async with httpx.AsyncClient(
-        headers={"User-Agent": USER_AGENT},
+        headers=BROWSER_HEADERS,
         timeout=8.0,
         limits=httpx.Limits(max_connections=20),
     ) as client:
