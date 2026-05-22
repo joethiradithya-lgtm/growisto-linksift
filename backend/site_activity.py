@@ -14,6 +14,7 @@ A site is "active" if it published at least one post in the last N months
 
 from __future__ import annotations
 
+import json
 import re
 import asyncio
 from dataclasses import dataclass, field, asdict
@@ -263,76 +264,120 @@ DATE_REGEXES = [
     re.compile(r"\b\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+(20\d{2})\b", re.I),
 ]
 
+# Pages to scrape — homepage first, then common content paths
+SCRAPE_PATHS = ["", "/news", "/blog", "/articles", "/posts", "/latest",
+                "/resources", "/insights", "/press", "/journal", "/stories"]
+
 
 def _extract_dates_from_html(html: str) -> list[datetime]:
+    """
+    Extract article publication dates from a page using four signals in order:
+    1. JSON-LD structured data (most reliable — explicit machine-readable dates)
+    2. <meta> Open Graph / standard date tags
+    3. <time datetime="..."> elements
+    4. Class-hinted text elements + regex fallback
+    """
     dates: list[datetime] = []
     soup = BeautifulSoup(html, "html.parser")
+    now = datetime.now(timezone.utc) + timedelta(days=2)
 
-    # Look at structured date elements first
-    for tag in soup.find_all(["time", "meta", "span", "div", "p"], limit=300):
-        # <time datetime="...">
-        if tag.name == "time" and tag.get("datetime"):
-            dt = _parse_date(tag["datetime"])
-            if dt:
-                dates.append(dt)
-                continue
-        # <meta property="article:published_time" content="...">
-        if tag.name == "meta":
-            prop = (tag.get("property") or tag.get("name") or "").lower()
-            if "published" in prop or "date" in prop or "modified" in prop:
-                content = tag.get("content")
-                if content:
-                    dt = _parse_date(content)
-                    if dt:
-                        dates.append(dt)
-            continue
-        # Class hints
-        cls = " ".join(tag.get("class", [])).lower()
-        if any(k in cls for k in ["date", "time", "published", "posted", "meta"]):
-            text = tag.get_text(" ", strip=True)[:120]
-            for rx in DATE_REGEXES:
-                m = rx.search(text)
-                if m:
-                    dt = _parse_date(m.group(0))
-                    if dt:
-                        dates.append(dt)
-                    break
+    def _add(raw: str) -> None:
+        dt = _parse_date(raw)
+        if dt and dt <= now and dt.year >= 2015:
+            dates.append(dt)
 
-    # If still nothing, regex-sweep the body text (limited)
+    # 1. JSON-LD — look for Article / NewsArticle / BlogPosting types
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                for field in ("datePublished", "dateModified", "uploadDate"):
+                    val = item.get(field)
+                    if val:
+                        _add(str(val))
+                # Handle @graph arrays (common on WordPress sites)
+                for node in item.get("@graph", []):
+                    if not isinstance(node, dict):
+                        continue
+                    for field in ("datePublished", "dateModified"):
+                        val = node.get(field)
+                        if val:
+                            _add(str(val))
+        except Exception:
+            pass
+
+    # 2. <meta> tags
+    for tag in soup.find_all("meta"):
+        prop = (tag.get("property") or tag.get("name") or "").lower()
+        if any(k in prop for k in ["published_time", "modified_time", "pubdate", "date"]):
+            content = tag.get("content", "")
+            if content:
+                _add(content)
+
+    # 3. <time datetime="..."> — very common on news/blog listing pages
+    for tag in soup.find_all("time"):
+        dt_attr = tag.get("datetime", "")
+        if dt_attr:
+            _add(dt_attr)
+
+    # 4. Class-hinted elements, then regex sweep
     if not dates:
-        text = soup.get_text(" ", strip=True)[:30000]
+        for tag in soup.find_all(["span", "div", "p", "abbr", "li"], limit=300):
+            cls = " ".join(tag.get("class", [])).lower()
+            if any(k in cls for k in ["date", "time", "published", "posted", "timestamp", "ago"]):
+                text = tag.get_text(" ", strip=True)[:120]
+                for rx in DATE_REGEXES:
+                    m = rx.search(text)
+                    if m:
+                        _add(m.group(0))
+                        break
+
+    if not dates:
+        text = soup.get_text(" ", strip=True)[:20000]
         for rx in DATE_REGEXES:
             for m in rx.finditer(text):
-                dt = _parse_date(m.group(0))
-                if dt:
-                    dates.append(dt)
+                _add(m.group(0))
 
-    # Sanity filter — drop wildly future dates and pre-2000
-    now = datetime.now(timezone.utc) + timedelta(days=2)
-    dates = [d for d in dates if d <= now and d.year >= 2000]
     return dates
 
 
 async def _check_scrape(
     client: httpx.AsyncClient, base: str, window_start: datetime, checked: list[str]
 ) -> Optional[tuple[datetime, int]]:
-    for path in BLOG_PATH_HINTS:
-        url = urljoin(base, path)
+    """
+    Visit homepage and common content paths, extract article dates.
+    Returns on the first page that yields at least one in-window date.
+    """
+    best: Optional[tuple[datetime, int]] = None
+
+    for path in SCRAPE_PATHS:
+        url = base if path == "" else urljoin(base, path)
         checked.append(url)
         r = await _fetch(client, url)
         if not r:
             continue
-        # Only treat HTML responses
-        ctype = r.headers.get("content-type", "").lower()
-        if "html" not in ctype:
+        if "html" not in r.headers.get("content-type", "").lower():
             continue
+
         dates = _extract_dates_from_html(r.text)
         if not dates:
             continue
+
         latest = max(dates)
         in_window = sum(1 for d in dates if d >= window_start)
-        return latest, in_window
-    return None
+
+        # If we found in-window articles, return immediately
+        if in_window > 0:
+            return latest, in_window
+
+        # Keep the most-recent result seen so far as a fallback
+        if best is None or latest > best[0]:
+            best = (latest, in_window)
+
+    return best
 
 
 # ── Orchestrator ───────────────────────────────────────────────────────
@@ -357,7 +402,30 @@ async def check_site_activity(
             limits=httpx.Limits(max_connections=5),
         )
 
+    def _make_result(method: str, latest: datetime, in_window: int) -> ActivityResult:
+        days_since = (datetime.now(timezone.utc) - latest).days
+        is_active = latest >= window_start
+        return ActivityResult(
+            domain=domain,
+            is_active=is_active,
+            last_post_date=latest.date().isoformat(),
+            days_since_last_post=days_since,
+            method=method,
+            posts_in_window=in_window,
+            window_months=window_months,
+            notes=(
+                f"Last post {latest.date().isoformat()} "
+                f"({'active' if is_active else 'inactive — last post outside window'}, "
+                f"via {method})."
+            ),
+            checked_urls=checked[:8],
+        )
+
     try:
+        # Keep the best "inactive" result found so far so we can fall through
+        # to the next method rather than stopping at a stale sitemap/RSS date.
+        inactive_fallback: Optional[ActivityResult] = None
+
         for method, fn in [
             ("sitemap", _check_sitemap),
             ("rss", _check_rss),
@@ -367,23 +435,15 @@ async def check_site_activity(
             if result is None:
                 continue
             latest, in_window = result
-            days_since = (datetime.now(timezone.utc) - latest).days
-            is_active = latest >= window_start
-            return ActivityResult(
-                domain=domain,
-                is_active=is_active,
-                last_post_date=latest.date().isoformat(),
-                days_since_last_post=days_since,
-                method=method,
-                posts_in_window=in_window,
-                window_months=window_months,
-                notes=(
-                    f"Last post {latest.date().isoformat()} "
-                    f"({'active' if latest >= window_start else 'inactive — last post outside window'}, "
-                    f"via {method})."
-                ),
-                checked_urls=checked[:8],
-            )
+            if latest >= window_start:
+                # Confirmed active — return immediately
+                return _make_result(method, latest, in_window)
+            # Found a date but outside the window — keep trying other methods
+            if inactive_fallback is None:
+                inactive_fallback = _make_result(method, latest, in_window)
+
+        if inactive_fallback is not None:
+            return inactive_fallback
 
         return ActivityResult(
             domain=domain,
