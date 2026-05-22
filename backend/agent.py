@@ -132,12 +132,12 @@ def _build_user_prompt(
 
 async def _gather_activity(
     domains: list[str], window_months: int, concurrency: int = 8
-) -> dict[str, dict]:
-    """Run site-activity checks in parallel across the batch."""
+) -> AsyncIterator[tuple[str, dict]]:
+    """Yield (domain, result) as each activity check completes — no waiting for all."""
     sem = asyncio.Semaphore(concurrency)
     async with httpx.AsyncClient(
         headers={"User-Agent": USER_AGENT},
-        timeout=12.0,
+        timeout=8.0,
         limits=httpx.Limits(max_connections=20),
     ) as client:
 
@@ -161,8 +161,9 @@ async def _gather_activity(
                         "checked_urls": [],
                     }
 
-        results = await asyncio.gather(*(one(d) for d in domains))
-    return dict(results)
+        tasks = [asyncio.ensure_future(one(d)) for d in domains]
+        for fut in asyncio.as_completed(tasks):
+            yield await fut
 
 
 async def analyze_batch_agentic(
@@ -184,11 +185,12 @@ async def analyze_batch_agentic(
 
     domains = [r["domain"] for r in batch]
 
-    # 2) Run parallel activity checks
+    # 2) Stream activity checks — yield each result as it arrives
     yield {"type": "status", "msg": f"Checking site activity for {len(domains)} domains..."}
-    activity_map = await _gather_activity(domains, window_months)
-    for d, a in activity_map.items():
-        yield {"type": "activity_done", "domain": d, "data": a}
+    activity_map: dict[str, dict] = {}
+    async for domain, data in _gather_activity(domains, window_months):
+        activity_map[domain] = data
+        yield {"type": "activity_done", "domain": domain, "data": data}
 
     # 3) Build the agent prompt
     user_prompt = _build_user_prompt(
