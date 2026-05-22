@@ -493,10 +493,6 @@
         <input type="number" id="maxSpam" value="30" min="0" max="100" />
       </div>
       <div class="filter-field">
-        <label>Min Relevance %</label>
-        <input type="number" id="minRelevance" value="40" min="0" max="100" />
-      </div>
-      <div class="filter-field">
         <label data-tip="How many months back to look for blog posts">Activity Window (mo)</label>
         <input type="number" id="windowMonths" value="6" min="1" max="24" />
       </div>
@@ -582,7 +578,6 @@
             <th data-tip="Spam score — lower is better">Spam</th>
             <th data-tip="Recent publishing activity">Activity</th>
             <th>Recommendation</th>
-            <th>AI Relevance</th>
             <th>AI Reasoning</th>
           </tr>
         </thead>
@@ -759,7 +754,6 @@ async function runAnalysis() {
   const minDR = parseInt(document.getElementById('minDR').value) || 0;
   const minTraffic = parseInt(document.getElementById('minTraffic').value) || 0;
   const maxSpam = parseInt(document.getElementById('maxSpam').value) || 100;
-  const minRelevance = parseInt(document.getElementById('minRelevance').value) || 0;
   const windowMonths = parseInt(document.getElementById('windowMonths').value) || 6;
 
   showError(''); showInfo('');
@@ -795,7 +789,7 @@ async function runAnalysis() {
     });
     setProgress(100, 'Analysis complete!');
     showInfo(`✅ Agent analyzed ${analysisResults.length} backlinks.`);
-    renderResults(analysisResults, minRelevance);
+    renderResults(analysisResults);
   } catch(err) {
     showError('Backend error: ' + err.message);
     logAgent('ERR', err.message, 'tag-error');
@@ -822,6 +816,7 @@ async function streamAgentAnalysis(payload) {
   const decoder = new TextDecoder();
   let buffer = '';
   let totalDone = 0;
+  let activityDone = 0;
   let totalCount = payload.backlinks.length;
 
   while (true) {
@@ -829,9 +824,8 @@ async function streamAgentAnalysis(payload) {
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
-    // SSE events are separated by \n\n
     const events = buffer.split('\n\n');
-    buffer = events.pop(); // keep incomplete event
+    buffer = events.pop();
 
     for (const evRaw of events) {
       if (!evRaw.trim()) continue;
@@ -844,12 +838,23 @@ async function streamAgentAnalysis(payload) {
       if (!dataStr) continue;
       let data;
       try { data = JSON.parse(dataStr); } catch { continue; }
+
+      // Per-domain activity progress (phase 1: 5% → 60%)
+      if (eventType === 'activity_done') {
+        activityDone++;
+        const pending = totalCount - activityDone;
+        const pct = 5 + Math.round((activityDone / totalCount) * 55);
+        setProgress(pct, `Checking activity: ${activityDone}/${totalCount} done — ${pending} pending`);
+      }
+
       handleStreamEvent(eventType, data, totalCount, () => totalDone, n => totalDone = n);
+
+      // Per-batch agent progress (phase 2: 60% → 95%)
       if (eventType === 'batch_done' && data.results) {
         analysisResults.push(...data.results);
         totalDone = analysisResults.length;
-        const pct = Math.min(95, Math.round((totalDone / totalCount) * 90));
-        setProgress(pct, `Analyzed ${totalDone}/${totalCount}...`);
+        const pct = 60 + Math.min(35, Math.round((totalDone / totalCount) * 35));
+        setProgress(pct, `Agent scored ${totalDone}/${totalCount}...`);
       }
     }
   }
@@ -899,13 +904,13 @@ function handleStreamEvent(type, data, total, getDone, setDone) {
 }
 
 // ─── Render Results ───────────────────────────────────────
-function renderResults(data, minRelevance = 0) {
+function renderResults(data) {
   const section = document.getElementById('results-section');
   section.style.display = 'block';
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   const hideInactive = document.getElementById('hideInactive').value === 'yes';
-  let filtered = data.filter(r => r.relevance_score >= minRelevance);
+  let filtered = [...data];
   if (hideInactive) filtered = filtered.filter(r => r.activity && r.activity.is_active);
 
   const counts = { Strong: 0, Good: 0, Weak: 0, Reject: 0 };
@@ -944,14 +949,13 @@ function renderTable(data) {
 
   const tbody = document.getElementById('resultsBody');
   if (sorted.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="9">
+    tbody.innerHTML = `<tr><td colspan="8">
       <div class="empty-state"><div class="icon">🔍</div><p>No results match current filters.</p></div>
     </td></tr>`;
     return;
   }
 
   tbody.innerHTML = sorted.map((r, i) => {
-    const relColor = r.relevance_score >= 80 ? '#00ff99' : r.relevance_score >= 60 ? '#4ade80' : r.relevance_score >= 40 ? '#facc15' : '#f87171';
     const drClass = r.dr >= 60 ? 'high' : r.dr >= 30 ? 'mid' : 'low';
     const trafficFmt = r.traffic >= 1000000 ? (r.traffic/1000000).toFixed(1)+'M' : r.traffic >= 1000 ? (r.traffic/1000).toFixed(1)+'K' : r.traffic;
     const spamColor = r.spam <= 15 ? '#4ade80' : r.spam <= 40 ? '#facc15' : '#f87171';
@@ -980,14 +984,6 @@ function renderTable(data) {
         <div class="activity-detail">${escapeHtml(lastPost)}${escapeHtml(method)}</div>
       </td>
       <td><span class="badge ${badge}">${r.recommendation}</span></td>
-      <td>
-        <div class="rel-wrap">
-          <div class="rel-bar-bg">
-            <div class="rel-bar-fill" style="width:${r.relevance_score}%;background:${relColor}"></div>
-          </div>
-          <span class="rel-score" style="color:${relColor}">${r.relevance_score}</span>
-        </div>
-      </td>
       <td class="td-reasoning">${escapeHtml(r.reasoning || '')}</td>
     </tr>`;
   }).join('');
@@ -997,9 +993,8 @@ function sortResults(key) {
   currentSort = key;
   document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('sort-' + key).classList.add('active');
-  const minRel = parseInt(document.getElementById('minRelevance').value) || 0;
   const hideInactive = document.getElementById('hideInactive').value === 'yes';
-  let data = analysisResults.filter(r => r.relevance_score >= minRel);
+  let data = [...analysisResults];
   if (hideInactive) data = data.filter(r => r.activity && r.activity.is_active);
   renderTable(data);
 }
@@ -1008,9 +1003,8 @@ function filterResults(tag) {
   currentFilter = tag;
   document.querySelectorAll('.filter-tag').forEach(t => t.classList.remove('active'));
   document.getElementById('ftag-' + tag).classList.add('active');
-  const minRel = parseInt(document.getElementById('minRelevance').value) || 0;
   const hideInactive = document.getElementById('hideInactive').value === 'yes';
-  let data = analysisResults.filter(r => r.relevance_score >= minRel);
+  let data = [...analysisResults];
   if (hideInactive) data = data.filter(r => r.activity && r.activity.is_active);
   renderTable(data);
 }
@@ -1019,21 +1013,20 @@ function filterResults(tag) {
 function exportCSV() {
   if (!analysisResults.length) return;
   const headers = [
-    'Domain','DR','Traffic','Spam Score','Recommendation','Relevance Score',
+    'Domain','DR','Traffic','Spam Score','Recommendation',
     'AI Reasoning','Composite Score',
-    'Is Active','Last Post Date','Days Since Last Post','Posts In Window','Activity Method'
+    'Is Active','Last Post Date','Days Since Last Post','Activity Method'
   ];
   const rows = analysisResults.map(r => {
     const a = r.activity || {};
     return [
       r.domain, r.dr, r.traffic, r.spam,
-      r.recommendation, r.relevance_score,
+      r.recommendation,
       `"${(r.reasoning || '').replace(/"/g,'""')}"`,
       r.composite_score,
       a.is_active ? 'yes' : 'no',
       a.last_post_date || '',
       a.days_since_last_post ?? '',
-      a.posts_in_window ?? 0,
       a.method || 'none'
     ];
   });

@@ -120,7 +120,7 @@ async def _check_sitemap(
 
     async def parse_sitemap(url: str, depth: int = 0) -> None:
         nonlocal latest, in_window
-        if depth > 1:
+        if depth > 1 or in_window >= 3:
             return
         checked.append(url)
         r = await _fetch(client, url)
@@ -142,14 +142,15 @@ async def _check_sitemap(
             if any(h in child_url.lower() for h in ["blog", "post", "news", "article"]):
                 await parse_sitemap(child_url, depth + 1)
 
-        # Page-level URLs
+        # Page-level URLs — stop once we've confirmed 3 recent posts
         for url_el in soup.find_all("url"):
+            if in_window >= 3:
+                break
             loc = url_el.find("loc")
             lastmod = url_el.find("lastmod")
             if not loc or not loc.text:
                 continue
             page_url = loc.text.strip().lower()
-            # Only consider URLs that look like blog/news content
             if not any(h in page_url for h in BLOG_PATH_HINTS):
                 continue
             if not lastmod or not lastmod.text:
@@ -188,7 +189,7 @@ async def _check_rss(
             continue
         latest: Optional[datetime] = None
         in_window = 0
-        for entry in feed.entries[:50]:
+        for entry in feed.entries[:3]:
             raw = entry.get("published") or entry.get("updated") or ""
             dt = _parse_date(raw)
             if not dt:
@@ -327,8 +328,8 @@ async def check_site_activity(
                 posts_in_window=in_window,
                 window_months=window_months,
                 notes=(
-                    f"Latest content found via {method}; "
-                    f"{in_window} post(s) in last {window_months}mo."
+                    f"Recent content found via {method}; "
+                    f"last post {latest.date().isoformat()}."
                 ),
                 checked_urls=checked[:8],
             )
