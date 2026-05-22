@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
@@ -37,8 +38,10 @@ from site_activity import check_site_activity, ActivityResult, USER_AGENT
 import agent_tools
 
 
-# Use Sonnet 4.5 — fast + cheap enough for batched analysis
 MODEL = "claude-sonnet-4-5"
+
+import claude_agent_sdk as _sdk_pkg
+_BUNDLED_CLI = Path(_sdk_pkg.__file__).parent / "_bundled" / "claude"
 
 SYSTEM_PROMPT = """You are an expert SEO backlink analyst working inside an agentic pipeline.
 
@@ -198,15 +201,14 @@ async def analyze_batch_agentic(
         model=MODEL,
         system_prompt=SYSTEM_PROMPT,
         mcp_servers={"linksift": mcp_server},
-        # Restrict to ONLY our custom tools — no Bash, no Read, no WebFetch,
-        # no filesystem. The agent must use our wrappers.
         allowed_tools=[
             "mcp__linksift__check_site_activity",
             "mcp__linksift__fetch_homepage_summary",
             "mcp__linksift__finalize_backlink_decision",
         ],
-        permission_mode="bypassPermissions",  # tools are sandboxed by design
+        permission_mode="bypassPermissions",
         max_turns=max(8, len(batch) * 2 + 4),
+        cli_path=_BUNDLED_CLI if _BUNDLED_CLI.exists() else None,
     )
 
     yield {"type": "status", "msg": f"Agent analyzing {len(batch)} backlinks..."}

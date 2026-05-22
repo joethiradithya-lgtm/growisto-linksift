@@ -16,7 +16,6 @@ Run:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -67,12 +66,6 @@ def _sse(event: str, data: Any) -> str:
 
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest):
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(
-            status_code=500,
-            detail="ANTHROPIC_API_KEY not set on the server.",
-        )
-
     if not req.backlinks:
         raise HTTPException(400, "No backlinks provided.")
 
@@ -127,10 +120,7 @@ async def analyze(req: AnalyzeRequest):
 # ── Health ─────────────────────────────────────────────────────────────
 @app.get("/healthz")
 async def healthz():
-    return {
-        "ok": True,
-        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
-    }
+    return {"ok": True}
 
 
 # ── Frontend ───────────────────────────────────────────────────────────
